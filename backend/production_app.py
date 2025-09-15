@@ -177,21 +177,33 @@ app.add_middleware(
 class Price(BaseModel):
     value: float
     currency: str
+    original: Optional[float] = None
+    original_currency: Optional[str] = None
 
 class SaveProductRequest(BaseModel):
     product_id: str
-    product_title: str
-    product_main_image_url: str
-    product_video_url: Optional[str] = None
-    product_description: Optional[str] = None
+    title: str
+    selected_price: Price
+    video_url: Optional[str] = None
+    image_main: Optional[str] = None
     images_extra: Optional[List[str]] = []
-    sale_price: float
-    sale_price_currency: str
-    original_price: Optional[float] = None
-    original_price_currency: Optional[str] = None
-    promotion_link: str
-    rating_weighted: Optional[float] = None
     lastest_volume: Optional[int] = None
+    rating_weighted: Optional[float] = None
+    category_id: Optional[str] = None
+    promotion_link: Optional[str] = None
+    product_url: Optional[str] = None
+    shop_url: Optional[str] = None
+    shop_title: Optional[str] = None
+    discount_percentage: Optional[float] = None
+    commission_rate: Optional[float] = None
+    commission_value: Optional[float] = None
+    product_detail_url: Optional[str] = None
+    product_sku: Optional[str] = None
+    product_brand: Optional[str] = None
+    product_condition: Optional[str] = None
+    product_warranty: Optional[str] = None
+    product_shipping_info: Optional[str] = None
+    product_return_policy: Optional[str] = None
 
 class UnsaveRequest(BaseModel):
     product_id: str
@@ -600,15 +612,15 @@ async def save_product(request: SaveProductRequest):
         
         cursor.execute(query, (
             request.product_id,
-            request.product_title,
-            request.product_main_image_url,
-            request.product_video_url,
-            request.product_description,
+            request.title,
+            request.image_main,
+            request.video_url,
+            None,  # product_description
             json.dumps(request.images_extra) if request.images_extra else None,
-            request.sale_price,
-            request.sale_price_currency,
-            request.original_price,
-            request.original_price_currency,
+            request.selected_price.value,
+            request.selected_price.currency,
+            request.selected_price.original,
+            request.selected_price.original_currency,
             request.promotion_link,
             request.rating_weighted,
             request.lastest_volume
