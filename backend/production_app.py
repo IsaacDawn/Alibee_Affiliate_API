@@ -205,8 +205,6 @@ class SaveProductRequest(BaseModel):
     product_shipping_info: Optional[str] = None
     product_return_policy: Optional[str] = None
 
-class UnsaveRequest(BaseModel):
-    product_id: str
 
 # Database connection helper
 def get_db_connection():
@@ -634,13 +632,13 @@ async def save_product(request: SaveProductRequest):
         raise HTTPException(status_code=500, detail="Failed to save product")
 
 # Unsave product endpoint
-@app.post("/unsave")
-async def unsave_product(request: UnsaveRequest):
+@app.delete("/unsave/{product_id}")
+async def unsave_product(product_id: str):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        cursor.execute("DELETE FROM saved_products WHERE product_id = %s", (request.product_id,))
+        cursor.execute("DELETE FROM saved_products WHERE product_id = %s", (product_id,))
         
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Product not found")

@@ -962,6 +962,26 @@ def unsave_product(product_id: str):
     finally:
         cur.close(); cn.close()
 
+@app.delete("/unsave/{product_id}")
+def unsave_product_simple(product_id: str):
+    """
+    Remove a product from saved_products table - Simple version for frontend.
+    """
+    cn = mysql.connector.connect(**DB_CFG)
+    cur = cn.cursor()
+    try:
+        cur.execute("DELETE FROM saved_products WHERE product_id = %s", (product_id,))
+        cn.commit()
+        
+        if cur.rowcount > 0:
+            return {"success": True, "message": "Product removed successfully"}
+        else:
+            return {"success": False, "detail": "Product not found"}
+    except Exception as e:
+        return {"success": False, "detail": "Failed to remove product"}
+    finally:
+        cur.close(); cn.close()
+
 @app.get("/saved")
 def get_saved_products(
     q: Optional[str] = Query(None, description="Search query"),
