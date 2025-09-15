@@ -213,10 +213,117 @@ def health():
     try:
         cn = mysql.connector.connect(**DB_CFG)
         cur = cn.cursor()
-        cur.execute("SELECT COUNT(*) FROM aliexpress_products")
-        count = cur.fetchone()[0]
+        
+        # Check if tables exist, if not create them
+        try:
+            cur.execute("SELECT COUNT(*) FROM aliexpress_products")
+            count = cur.fetchone()[0]
+            info.update({"db": "ok", "productsCount": count})
+        except mysql.connector.Error as e:
+            if e.errno == 1146:  # Table doesn't exist
+                # Create tables if they don't exist
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS aliexpress_products (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        product_id VARCHAR(255) NOT NULL UNIQUE,
+                        product_title TEXT NOT NULL,
+                        product_main_image_url TEXT,
+                        product_video_url TEXT,
+                        sale_price DECIMAL(10,2),
+                        sale_price_currency VARCHAR(10) DEFAULT 'USD',
+                        original_price DECIMAL(10,2),
+                        original_price_currency VARCHAR(10) DEFAULT 'USD',
+                        lastest_volume INT,
+                        rating_weighted DECIMAL(3,2),
+                        first_level_category_id VARCHAR(50),
+                        promotion_link TEXT,
+                        fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        
+                        INDEX idx_product_id (product_id),
+                        INDEX idx_category (first_level_category_id),
+                        INDEX idx_volume (lastest_volume),
+                        INDEX idx_rating (rating_weighted),
+                        INDEX idx_saved_at (saved_at),
+                        FULLTEXT idx_title (product_title)
+                    )
+                """)
+                
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS saved_products (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        product_id VARCHAR(255) NOT NULL,
+                        title TEXT,
+                        image_main TEXT,
+                        video_url TEXT,
+                        sale_price DECIMAL(10,2),
+                        sale_price_currency VARCHAR(10),
+                        original_price DECIMAL(10,2),
+                        original_price_currency VARCHAR(10),
+                        lastest_volume INT,
+                        rating_weighted DECIMAL(3,2),
+                        category_id VARCHAR(255),
+                        promotion_link TEXT,
+                        product_url TEXT,
+                        shop_url TEXT,
+                        shop_title VARCHAR(500),
+                        discount_percentage DECIMAL(5,2),
+                        commission_rate DECIMAL(5,2),
+                        commission_value DECIMAL(10,2),
+                        images_extra JSON,
+                        product_detail_url TEXT,
+                        product_sku VARCHAR(255),
+                        product_brand VARCHAR(255),
+                        product_condition VARCHAR(50),
+                        product_warranty VARCHAR(255),
+                        product_shipping_info TEXT,
+                        product_return_policy TEXT,
+                        saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        
+                        INDEX idx_product_id (product_id),
+                        INDEX idx_saved_at (saved_at)
+                    )
+                """)
+                
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS search_history (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        query VARCHAR(255) NOT NULL,
+                        results_count INT DEFAULT 0,
+                        user_ip VARCHAR(45),
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        
+                        INDEX idx_query (query),
+                        INDEX idx_created_at (created_at)
+                    )
+                """)
+                
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS affiliate_links (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        product_id VARCHAR(255) NOT NULL,
+                        original_url TEXT NOT NULL,
+                        affiliate_url TEXT NOT NULL,
+                        clicks INT DEFAULT 0,
+                        conversions INT DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        
+                        INDEX idx_product_id (product_id),
+                        INDEX idx_clicks (clicks)
+                    )
+                """)
+                
+                cn.commit()
+                info.update({"db": "ok", "productsCount": 0, "tables_created": True})
+            else:
+                raise e
+        
         cur.close(); cn.close()
-        info.update({"db": "ok", "productsCount": count})
     except Exception as e:
         info.update({"db": "error", "message": str(e)})
 
@@ -229,6 +336,31 @@ def health():
         info["ali_api_status"] = "نیاز به تنظیم APP_KEY و APP_SECRET"
     
     return info
+
+@app.get("/status")
+def health_simple():
+    """
+    Simple health check endpoint for frontend compatibility.
+    """
+    try:
+        # Test database connection
+        cn = mysql.connector.connect(**DB_CFG)
+        cur = cn.cursor()
+        cur.execute("SELECT 1")
+        cur.close(); cn.close()
+        
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "aliexpress_api": "configured" if APP_KEY else "not_configured"
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "database": "error",
+            "aliexpress_api": "not_configured",
+            "error": str(e)
+        }
 
 @app.get("/demo")
 def demo_products():
@@ -470,8 +602,10 @@ def get_stats():
         cur.close(); cn.close()
         
         stats = {
-            "saved_products": saved_products,
-            "total_searches": total_searches,
+            "totalProducts": 0,  # This would come from AliExpress API
+            "savedProducts": saved_products,
+            "totalSearches": total_searches,
+            "activeUsers": 0,  # This could be tracked in a separate table
             "affiliate_links": affiliate_links,
             "recent_searches": recent_searches,
         }
@@ -482,12 +616,12 @@ def get_stats():
 
 @app.get("/products")
 def list_products(
-    q: Optional[str] = None,
-    categoryId: Optional[str] = None,
-    hasVideo: Optional[bool] = None,
+    q: Optional[str] = Query(None, description="Search query"),
+    categoryId: Optional[str] = Query(None, description="Category ID"),
+    hasVideo: Optional[bool] = Query(None, description="Has video"),
     sort: str = Query("volume_desc", pattern="^(volume_desc|discount_desc|rating_desc)$"),
-    page: int = 1,
-    pageSize: int = int(os.getenv("DEFAULT_PAGE_SIZE", 20)),
+    page: int = Query(1, ge=1, description="Page number"),
+    pageSize: int = Query(20, ge=1, le=100, description="Page size"),
 ):
     """
     Fetch saved products from our MySQL (used for Client Interface and saved ❤️).
@@ -527,6 +661,134 @@ def list_products(
     cur.close(); cn.close()
 
     return {"items": rows, "page": page, "pageSize": pageSize, "hasMore": len(rows) == pageSize}
+
+@app.post("/save")
+def save_product_simple(p: SaveProduct):
+    """
+    Save/Upsert a product (❤️) into our DB - Simple version for frontend.
+    """
+    cn = mysql.connector.connect(**DB_CFG)
+    cur = cn.cursor()
+    try:
+        # First, ensure saved_products table has all necessary columns
+        try:
+            columns_to_add = [
+                "ADD COLUMN title TEXT",
+                "ADD COLUMN image_main TEXT",
+                "ADD COLUMN video_url TEXT",
+                "ADD COLUMN sale_price DECIMAL(10,2)",
+                "ADD COLUMN sale_price_currency VARCHAR(10)",
+                "ADD COLUMN original_price DECIMAL(10,2)",
+                "ADD COLUMN original_price_currency VARCHAR(10)",
+                "ADD COLUMN lastest_volume INT",
+                "ADD COLUMN rating_weighted DECIMAL(3,2)",
+                "ADD COLUMN category_id VARCHAR(255)",
+                "ADD COLUMN promotion_link TEXT",
+                "ADD COLUMN product_url TEXT",
+                "ADD COLUMN shop_url TEXT",
+                "ADD COLUMN shop_title VARCHAR(500)",
+                "ADD COLUMN discount_percentage DECIMAL(5,2)",
+                "ADD COLUMN commission_rate DECIMAL(5,2)",
+                "ADD COLUMN commission_value DECIMAL(10,2)",
+                "ADD COLUMN images_extra JSON",
+                "ADD COLUMN product_detail_url TEXT",
+                "ADD COLUMN product_sku VARCHAR(255)",
+                "ADD COLUMN product_brand VARCHAR(255)",
+                "ADD COLUMN product_condition VARCHAR(50)",
+                "ADD COLUMN product_warranty VARCHAR(255)",
+                "ADD COLUMN product_shipping_info TEXT",
+                "ADD COLUMN product_return_policy TEXT",
+                "ADD COLUMN saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+                "ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+                "ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+            ]
+            
+            for column in columns_to_add:
+                try:
+                    cur.execute(f"ALTER TABLE saved_products {column}")
+                except mysql.connector.Error as e:
+                    # Column already exists, ignore
+                    if e.errno != 1060:  # Duplicate column name
+                        raise
+        except Exception:
+            pass  # Ignore column addition errors
+        
+        # Insert into saved_products table
+        cur.execute(
+            """
+            INSERT INTO saved_products (
+              product_id, title, image_main, video_url,
+              sale_price, sale_price_currency, original_price, original_price_currency,
+              lastest_volume, rating_weighted, category_id, promotion_link,
+              product_url, shop_url, shop_title, discount_percentage,
+              commission_rate, commission_value, images_extra, product_detail_url,
+              product_sku, product_brand, product_condition, product_warranty,
+              product_shipping_info, product_return_policy
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON DUPLICATE KEY UPDATE
+              title=VALUES(title),
+              image_main=VALUES(image_main),
+              video_url=VALUES(video_url),
+              sale_price=VALUES(sale_price),
+              sale_price_currency=VALUES(sale_price_currency),
+              original_price=VALUES(original_price),
+              original_price_currency=VALUES(original_price_currency),
+              lastest_volume=VALUES(lastest_volume),
+              rating_weighted=VALUES(rating_weighted),
+              category_id=VALUES(category_id),
+              promotion_link=VALUES(promotion_link),
+              product_url=VALUES(product_url),
+              shop_url=VALUES(shop_url),
+              shop_title=VALUES(shop_title),
+              discount_percentage=VALUES(discount_percentage),
+              commission_rate=VALUES(commission_rate),
+              commission_value=VALUES(commission_value),
+              images_extra=VALUES(images_extra),
+              product_detail_url=VALUES(product_detail_url),
+              product_sku=VALUES(product_sku),
+              product_brand=VALUES(product_brand),
+              product_condition=VALUES(product_condition),
+              product_warranty=VALUES(product_warranty),
+              product_shipping_info=VALUES(product_shipping_info),
+              product_return_policy=VALUES(product_return_policy),
+              updated_at=CURRENT_TIMESTAMP
+            """,
+            (
+                p.product_id,
+                p.title,
+                p.image_main,
+                p.video_url,
+                p.selected_price.value,
+                p.selected_price.currency,
+                p.selected_price.original,
+                p.selected_price.original_currency or p.selected_price.currency,
+                p.lastest_volume,
+                p.rating_weighted,
+                p.category_id,
+                p.promotion_link,
+                p.product_url,
+                p.shop_url,
+                p.shop_title,
+                p.discount_percentage,
+                p.commission_rate,
+                p.commission_value,
+                json.dumps(p.images_extra) if p.images_extra else None,
+                p.product_detail_url,
+                p.product_sku,
+                p.product_brand,
+                p.product_condition,
+                p.product_warranty,
+                p.product_shipping_info,
+                p.product_return_policy,
+            ),
+        )
+        cn.commit()
+        return {"success": True, "message": "Product saved successfully"}
+    except Exception as e:
+        cn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cur.close(); cn.close()
 
 @app.post("/affiliator/save")
 def save_product(p: SaveProduct):
@@ -656,6 +918,30 @@ def save_product(p: SaveProduct):
     finally:
         cur.close(); cn.close()
 
+@app.post("/unsave")
+def unsave_product_simple(request: dict):
+    """
+    Remove a product from saved_products table - Simple version for frontend.
+    """
+    product_id = request.get("product_id")
+    if not product_id:
+        raise HTTPException(status_code=400, detail="product_id is required")
+    
+    cn = mysql.connector.connect(**DB_CFG)
+    cur = cn.cursor()
+    try:
+        cur.execute("DELETE FROM saved_products WHERE product_id = %s", (product_id,))
+        cn.commit()
+        
+        if cur.rowcount > 0:
+            return {"success": True, "message": "Product unsaved successfully"}
+        else:
+            return {"success": False, "message": "Product not found in saved list"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    finally:
+        cur.close(); cn.close()
+
 @app.delete("/affiliator/unsave/{product_id}")
 def unsave_product(product_id: str):
     """
@@ -678,10 +964,10 @@ def unsave_product(product_id: str):
 
 @app.get("/saved")
 def get_saved_products(
-    q: Optional[str] = None,
+    q: Optional[str] = Query(None, description="Search query"),
     sort: str = Query("saved_at_desc", pattern="^(saved_at_desc|saved_at_asc|title_asc|title_desc)$"),
-    page: int = 1,
-    pageSize: int = int(os.getenv("DEFAULT_PAGE_SIZE", 20)),
+    page: int = Query(1, ge=1, description="Page number"),
+    pageSize: int = Query(20, ge=1, le=100, description="Page size"),
 ):
     """
     Fetch saved products from saved_products table.
@@ -727,6 +1013,146 @@ def get_saved_products(
     cur.close(); cn.close()
 
     return {"items": rows, "page": page, "pageSize": pageSize, "hasMore": len(rows) == pageSize, "total": total}
+
+@app.get("/demo-simple")
+def demo_products_simple():
+    """
+    Demo endpoint with guaranteed sample products for presentation - Simple version for frontend.
+    """
+    # Sample AliExpress products for demonstration
+    sample_products = [
+        {
+            "product_id": "1005001234567890",
+            "product_title": "Wireless Bluetooth Headphones - High Quality Sound",
+            "product_main_image_url": "https://ae01.alicdn.com/kf/H1234567890.jpg",
+            "product_video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+            "sale_price": 25.99,
+            "sale_price_currency": "USD",
+            "original_price": 49.99,
+            "original_price_currency": "USD",
+            "lastest_volume": 1250,
+            "rating_weighted": 4.8,
+            "first_level_category_id": "100001",
+            "promotion_link": "https://s.click.aliexpress.com/demo1",
+            "commission_rate": 8.5,
+            "discount": 48,
+            "saved_at": None
+        },
+        {
+            "product_id": "1005001234567891",
+            "product_title": "Smart Watch with Heart Rate Monitor - Fitness Tracker",
+            "product_main_image_url": "https://ae01.alicdn.com/kf/H1234567891.jpg",
+            "product_video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
+            "sale_price": 89.99,
+            "sale_price_currency": "USD",
+            "original_price": 159.99,
+            "original_price_currency": "USD",
+            "lastest_volume": 890,
+            "rating_weighted": 4.6,
+            "first_level_category_id": "100002",
+            "promotion_link": "https://s.click.aliexpress.com/demo2",
+            "commission_rate": 12.0,
+            "discount": 44,
+            "saved_at": None
+        },
+        {
+            "product_id": "1005001234567892",
+            "product_title": "Portable Power Bank 20000mAh - Fast Charging",
+            "product_main_image_url": "https://ae01.alicdn.com/kf/H1234567892.jpg",
+            "product_video_url": "",
+            "sale_price": 19.99,
+            "sale_price_currency": "USD",
+            "original_price": 35.99,
+            "original_price_currency": "USD",
+            "lastest_volume": 2100,
+            "rating_weighted": 4.7,
+            "first_level_category_id": "100003",
+            "promotion_link": "https://s.click.aliexpress.com/demo3",
+            "commission_rate": 6.5,
+            "discount": 44,
+            "saved_at": None
+        },
+        {
+            "product_id": "1005001234567893",
+            "product_title": "LED Strip Lights RGB - Smart Home Lighting",
+            "product_main_image_url": "https://ae01.alicdn.com/kf/H1234567893.jpg",
+            "product_video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+            "sale_price": 12.99,
+            "sale_price_currency": "USD",
+            "original_price": 24.99,
+            "original_price_currency": "USD",
+            "lastest_volume": 1800,
+            "rating_weighted": 4.5,
+            "first_level_category_id": "100004",
+            "promotion_link": "https://s.click.aliexpress.com/demo4",
+            "commission_rate": 9.0,
+            "discount": 48,
+            "saved_at": None
+        },
+        {
+            "product_id": "1005001234567894",
+            "product_title": "Phone Case with Card Holder - Premium Protection",
+            "product_main_image_url": "https://ae01.alicdn.com/kf/H1234567894.jpg",
+            "product_video_url": "",
+            "sale_price": 8.99,
+            "sale_price_currency": "USD",
+            "original_price": 15.99,
+            "original_price_currency": "USD",
+            "lastest_volume": 3200,
+            "rating_weighted": 4.9,
+            "first_level_category_id": "100003",
+            "promotion_link": "https://s.click.aliexpress.com/demo5",
+            "commission_rate": 15.0,
+            "discount": 44,
+            "saved_at": None
+        }
+    ]
+    
+    # Check which demo products are saved by joining with saved_products table
+    try:
+        cn = mysql.connector.connect(**DB_CFG)
+        cur = cn.cursor()
+        
+        # Get product IDs from the demo products
+        product_ids = [str(item.get('product_id', '')) for item in sample_products if item.get('product_id')]
+        
+        if product_ids:
+            # Create placeholders for the IN clause
+            placeholders = ','.join(['%s'] * len(product_ids))
+            
+            # Query saved_products table to get saved_at timestamps
+            cur.execute(f"""
+                SELECT product_id, saved_at 
+                FROM saved_products 
+                WHERE product_id IN ({placeholders})
+            """, product_ids)
+            
+            saved_products = {row[0]: row[1] for row in cur.fetchall()}
+            
+            # Add saved_at field to demo products
+            for item in sample_products:
+                product_id = str(item.get('product_id', ''))
+                if product_id in saved_products:
+                    item['saved_at'] = saved_products[product_id].isoformat() if saved_products[product_id] else None
+                else:
+                    item['saved_at'] = None
+        
+        cur.close(); cn.close()
+    except Exception as e:
+        # If database check fails, just continue without saved_at info
+        print(f"Warning: Could not check saved demo products: {e}")
+        for item in sample_products:
+            item['saved_at'] = None
+    
+    return {
+        "items": sample_products,
+        "page": 1,
+        "pageSize": 5,
+        "total": len(sample_products),
+        "hasMore": False,
+        "method": "demo",
+        "source": "sample_data"
+    }
 
 @app.get("/search-md5")
 def search_products_md5(
@@ -914,16 +1340,16 @@ def search_products_demo(
     # Continue with real API call
     return search_products_real(request, q, categoryId, page, pageSize, hot, target_currency, target_language)
 
-@app.get("/search")
+@app.get("/search-api")
 def search_products_real(
     request: Request,
-    q: Optional[str] = None,
-    categoryId: Optional[str] = None,
-    page: int = 1,
-    pageSize: int = int(os.getenv("DEFAULT_PAGE_SIZE", 20)),
-    hot: bool = False,
-    target_currency: str = "USD",
-    target_language: str = "EN",
+    q: Optional[str] = Query(None, description="Search query"),
+    categoryId: Optional[str] = Query(None, description="Category ID"),
+    page: int = Query(1, ge=1, description="Page number"),
+    pageSize: int = Query(20, ge=1, le=100, description="Page size"),
+    hot: bool = Query(False, description="Hot products only"),
+    target_currency: str = Query("USD", description="Target currency"),
+    target_language: str = Query("EN", description="Target language"),
 ):
     """
     Direct product search from AliExpress API
@@ -1133,6 +1559,176 @@ def search_products_real(
         raise HTTPException(status_code=502, detail=f"AliExpress HTTP error: {rexc} {text}")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"AliExpress error: {e}")
+
+@app.get("/search-demo-v2")
+def search_products_with_demo_fallback(
+    request: Request,
+    q: Optional[str] = Query(None, description="Search query"),
+    categoryId: Optional[str] = Query(None, description="Category ID"),
+    page: int = Query(1, ge=1, description="Page number"),
+    pageSize: int = Query(20, ge=1, le=100, description="Page size"),
+    hot: bool = Query(False, description="Hot products only"),
+    target_currency: str = Query("USD", description="Target currency"),
+    target_language: str = Query("EN", description="Target language"),
+    demo: bool = Query(False, description="Use demo mode"),
+):
+    """
+    Search products with demo fallback - guaranteed to return results
+    """
+    if demo or not APP_KEY or not APP_SECRET:
+        # Return demo products for guaranteed results
+        sample_products = [
+            {
+                "product_id": "1005001234567890",
+                "product_title": f"Demo Product for '{q or 'search'}' - High Quality",
+                "product_main_image_url": "https://ae01.alicdn.com/kf/H1234567890.jpg",
+                "product_video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+                "sale_price": 25.99,
+                "sale_price_currency": "USD",
+                "original_price": 49.99,
+                "original_price_currency": "USD",
+                "lastest_volume": 1250,
+                "rating_weighted": 4.8,
+                "first_level_category_id": "100001",
+                "promotion_link": "https://s.click.aliexpress.com/demo1",
+                "commission_rate": 8.5,
+                "discount": 48,
+                "saved_at": None
+            },
+            {
+                "product_id": "1005001234567891",
+                "product_title": f"Smart {q or 'Device'} - Premium Quality",
+                "product_main_image_url": "https://ae01.alicdn.com/kf/H1234567891.jpg",
+                "product_video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
+                "sale_price": 89.99,
+                "sale_price_currency": "USD",
+                "original_price": 159.99,
+                "original_price_currency": "USD",
+                "lastest_volume": 890,
+                "rating_weighted": 4.6,
+                "first_level_category_id": "100002",
+                "promotion_link": "https://s.click.aliexpress.com/demo2",
+                "commission_rate": 12.0,
+                "discount": 44,
+                "saved_at": None
+            },
+            {
+                "product_id": "1005001234567892",
+                "product_title": f"Portable {q or 'Gadget'} - Fast Performance",
+                "product_main_image_url": "https://ae01.alicdn.com/kf/H1234567892.jpg",
+                "product_video_url": "",
+                "sale_price": 19.99,
+                "sale_price_currency": "USD",
+                "original_price": 35.99,
+                "original_price_currency": "USD",
+                "lastest_volume": 2100,
+                "rating_weighted": 4.7,
+                "first_level_category_id": "100003",
+                "promotion_link": "https://s.click.aliexpress.com/demo3",
+                "commission_rate": 6.5,
+                "discount": 44,
+                "saved_at": None
+            }
+        ]
+        
+        return {
+            "items": sample_products,
+            "page": page,
+            "pageSize": pageSize,
+            "total": len(sample_products),
+            "hasMore": False,
+            "method": "demo_search",
+            "source": "demo_data",
+            "demo_mode": True
+        }
+    
+    # Continue with real API call
+    return search_products_real(request, q, categoryId, page, pageSize, hot, target_currency, target_language)
+
+@app.get("/search")
+def search_products_with_fallback(
+    request: Request,
+    q: Optional[str] = Query(None, description="Search query"),
+    categoryId: Optional[str] = Query(None, description="Category ID"),
+    page: int = Query(1, ge=1, description="Page number"),
+    pageSize: int = Query(20, ge=1, le=100, description="Page size"),
+    hot: bool = Query(False, description="Hot products only"),
+    target_currency: str = Query("USD", description="Target currency"),
+    target_language: str = Query("EN", description="Target language"),
+    demo: bool = Query(False, description="Use demo mode"),
+):
+    """
+    Search products with demo fallback - guaranteed to return results
+    """
+    if demo or not APP_KEY or not APP_SECRET:
+        # Return demo products for guaranteed results
+        sample_products = [
+            {
+                "product_id": "1005001234567890",
+                "product_title": f"Demo Product for '{q or 'search'}' - High Quality",
+                "product_main_image_url": "https://ae01.alicdn.com/kf/H1234567890.jpg",
+                "product_video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+                "sale_price": 25.99,
+                "sale_price_currency": "USD",
+                "original_price": 49.99,
+                "original_price_currency": "USD",
+                "lastest_volume": 1250,
+                "rating_weighted": 4.8,
+                "first_level_category_id": "100001",
+                "promotion_link": "https://s.click.aliexpress.com/demo1",
+                "commission_rate": 8.5,
+                "discount": 48,
+                "saved_at": None
+            },
+            {
+                "product_id": "1005001234567891",
+                "product_title": f"Smart {q or 'Device'} - Premium Quality",
+                "product_main_image_url": "https://ae01.alicdn.com/kf/H1234567891.jpg",
+                "product_video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
+                "sale_price": 89.99,
+                "sale_price_currency": "USD",
+                "original_price": 159.99,
+                "original_price_currency": "USD",
+                "lastest_volume": 890,
+                "rating_weighted": 4.6,
+                "first_level_category_id": "100002",
+                "promotion_link": "https://s.click.aliexpress.com/demo2",
+                "commission_rate": 12.0,
+                "discount": 44,
+                "saved_at": None
+            },
+            {
+                "product_id": "1005001234567892",
+                "product_title": f"Portable {q or 'Gadget'} - Fast Performance",
+                "product_main_image_url": "https://ae01.alicdn.com/kf/H1234567892.jpg",
+                "product_video_url": "",
+                "sale_price": 19.99,
+                "sale_price_currency": "USD",
+                "original_price": 35.99,
+                "original_price_currency": "USD",
+                "lastest_volume": 2100,
+                "rating_weighted": 4.7,
+                "first_level_category_id": "100003",
+                "promotion_link": "https://s.click.aliexpress.com/demo3",
+                "commission_rate": 6.5,
+                "discount": 44,
+                "saved_at": None
+            }
+        ]
+        
+        return {
+            "items": sample_products,
+            "page": page,
+            "pageSize": pageSize,
+            "total": len(sample_products),
+            "hasMore": False,
+            "method": "demo_search",
+            "source": "demo_data",
+            "demo_mode": True
+        }
+    
+    # Continue with real API call
+    return search_products_real(request, q, categoryId, page, pageSize, hot, target_currency, target_language)
         
 @app.post("/ali/link")
 def ali_generate_link(urls: List[str]):
