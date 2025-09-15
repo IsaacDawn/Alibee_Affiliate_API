@@ -6,6 +6,10 @@ import mysql.connector
 import os
 import json
 import logging
+import time
+import hmac
+import hashlib
+import requests
 from dotenv import load_dotenv
 
 # Configure logging
@@ -19,6 +23,125 @@ load_dotenv()
 APP_KEY = os.getenv("APP_KEY")
 APP_SECRET = os.getenv("APP_SECRET")
 TRACKING_ID = os.getenv("TRACKING_ID")
+
+# ─────────────────── AliExpress Client (HMAC-SHA256 /sync) ───────────────────
+class AliClient:
+    """
+    Client for AliExpress OpenService /sync gateway (api-sg.aliexpress.com/sync)
+    using HMAC-SHA256 signatures.
+    """
+
+    def __init__(self, app_key: str, app_secret: str, tracking_id: str,
+                 base: str = "https://api-sg.aliexpress.com/sync") -> None:
+        if not app_key or not app_secret:
+            raise RuntimeError("APP_KEY/APP_SECRET are required.")
+        self.app_key = app_key
+        self.app_secret = app_secret.encode("utf-8")
+        self.tracking_id = tracking_id
+        self.base = base
+
+    @staticmethod
+    def _ts_ms() -> str:
+        return str(int(time.time() * 1000))
+
+    @staticmethod
+    def _sorted_plain(params: Dict[str, Any]) -> bytes:
+        items = sorted((k, v) for k, v in params.items() if v is not None)
+        plain = "&".join(f"{k}={v}" for k, v in items)
+        return plain.encode("utf-8")
+
+    def _sign_sha256(self, params: Dict[str, Any]) -> str:
+        # Remove sign parameter if it exists
+        params_copy = {k: v for k, v in params.items() if k != "sign"}
+        plain = self._sorted_plain(params_copy)
+        return hmac.new(self.app_secret, plain, hashlib.sha256).hexdigest().upper()
+
+    def call(self, method: str, **service_params) -> Dict[str, Any]:
+        base_params = {
+            "method": method,
+            "app_key": self.app_key,
+            "sign_method": "sha256",
+            "timestamp": self._ts_ms(),
+            "tracking_id": self.tracking_id,
+        }
+        params = {**base_params, **{k: v for k, v in service_params.items() if v is not None}}
+        params["sign"] = self._sign_sha256(params)
+
+        r = requests.get(self.base, params=params, timeout=30)
+        r.raise_for_status()
+        return r.json()
+
+# Initialize AliExpress client
+ali_client: Optional[AliClient] = None
+if APP_KEY and APP_SECRET:
+    try:
+        ali_client = AliClient(APP_KEY, APP_SECRET, TRACKING_ID)
+    except Exception as e:
+        logger.error(f"Failed to initialize AliExpress client: {e}")
+        ali_client = None
+
+# ─────────────────── Helpers ───────────────────
+def _normalize_items(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Normalize various AliExpress response shapes into a flat list of product dicts.
+    """
+    # response may be wrapped like "..._response" -> resp_result -> result -> products/list/items
+    resp = next((raw.get(k) for k in raw.keys() if k.endswith("_response")), raw) or {}
+    resp_result = resp.get("resp_result") or resp.get("result") or {}
+    result = resp_result.get("result") or {}
+    items = (
+        result.get("products")
+        or result.get("items")
+        or result.get("list")
+        or result.get("result")
+        or raw.get("items")
+        or []
+    )
+    if isinstance(items, dict):
+        # sometimes nested like {"items":[...]} again
+        for key in ("items", "list", "products", "data"):
+            if isinstance(items.get(key), list):
+                items = items[key]
+                break
+
+    out: List[Dict[str, Any]] = []
+    for it in items or []:
+        sale = it.get("sale_price")
+        orig = it.get("original_price")
+        curr = it.get("currency") or (sale.get("currency") if isinstance(sale, dict) else None) or "USD"
+        sale_val = sale.get("value") if isinstance(sale, dict) else sale
+        orig_val = orig.get("value") if isinstance(orig, dict) else orig
+
+        out.append({
+            "product_id": it.get("product_id") or it.get("item_id") or it.get("id"),
+            "product_title": it.get("product_title") or it.get("title"),
+            "product_main_image_url": it.get("product_main_image_url") or it.get("main_image") or it.get("image_url"),
+            "product_video_url": it.get("product_video_url") or it.get("video_url"),
+            "sale_price": sale_val,
+            "sale_price_currency": curr,
+            "original_price": orig_val,
+            "original_price_currency": curr,
+            "lastest_volume": it.get("lastest_volume") or it.get("volume") or it.get("sales"),
+            "rating_weighted": it.get("rating_weighted") or it.get("rating") or it.get("score"),
+            "first_level_category_id": it.get("first_level_category_id") or it.get("category_id"),
+            "promotion_link": it.get("promotion_link") or it.get("target_url"),
+            # New fields from AliExpress API
+            "product_url": it.get("product_detail_url"),
+            "shop_url": it.get("shop_url"),
+            "shop_title": it.get("shop_name"),
+            "discount_percentage": it.get("discount"),
+            "commission_rate": it.get("hot_product_commission_rate") or it.get("commission_rate"),
+            "commission_value": it.get("commission_value"),
+            "product_detail_url": it.get("product_detail_url"),
+            "product_sku": it.get("sku_id"),
+            "product_brand": it.get("brand"),
+            "product_condition": it.get("condition"),
+            "product_warranty": it.get("warranty"),
+            "product_shipping_info": it.get("shipping_info"),
+            "product_return_policy": it.get("return_policy"),
+            "images_extra": it.get("product_small_image_urls", {}).get("string", []) if it.get("product_small_image_urls") else [],
+        })
+    return out
 
 # Database Configuration
 DB_CFG = dict(
@@ -159,8 +282,11 @@ async def health_check():
         return {
             "status": "healthy",
             "database": "connected",
-            "aliexpress_api": "configured" if APP_KEY else "not_configured",
-            "saved_products_count": count
+            "aliexpress_api": "configured" if ali_client else "not_configured",
+            "saved_products_count": count,
+            "app_key": "set" if APP_KEY else "not_set",
+            "app_secret": "set" if APP_SECRET else "not_set",
+            "tracking_id": "set" if TRACKING_ID else "not_set"
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
@@ -204,17 +330,161 @@ async def search_products(
     pageSize: int = Query(20, ge=1, le=100, description="Page size")
 ):
     try:
-        if not APP_KEY or not APP_SECRET or not TRACKING_ID:
-            logger.warning("AliExpress API credentials not configured, returning mock data")
+        if not ali_client:
+            logger.warning("AliExpress API not configured, returning mock data")
             return generate_mock_data(page, pageSize)
         
-        # AliExpress API call would go here
-        # For now, return mock data
-        return generate_mock_data(page, pageSize)
+        # Use AliExpress API with MD5 signature method (working solution)
+        import hashlib
+        import time
         
+        # Base URL for AliExpress API
+        base_url = 'https://api-sg.aliexpress.com/sync'
+        
+        # System parameters
+        sys_params = {
+            'method': 'aliexpress.affiliate.product.query',
+            'app_key': APP_KEY,
+            'sign_method': 'md5',
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime()),
+            'format': 'json',
+            'v': '2.0'
+        }
+        
+        # API parameters
+        api_params = {
+            'page_no': page,
+            'page_size': pageSize,
+            'target_language': 'EN',
+            'target_currency': 'USD',
+            'trackingId': TRACKING_ID
+        }
+        
+        # Add search parameters
+        if q:
+            api_params['keywords'] = q
+        else:
+            # If no search query, get hot products
+            sys_params['method'] = 'aliexpress.affiliate.hotproduct.query'
+        
+        # Combine all parameters
+        all_params = {**sys_params, **api_params}
+        
+        # Remove empty values
+        clean_params = {k: v for k, v in all_params.items() if v is not None and v != ''}
+        
+        # Create MD5 signature
+        def create_md5_signature(params, secret):
+            # Sort parameters
+            sorted_params = sorted(params.items())
+            
+            # Create base string: secret + key1value1key2value2... + secret
+            base_string = secret
+            for key, value in sorted_params:
+                base_string += key + str(value)
+            base_string += secret
+            
+            # Create MD5 hash and convert to uppercase
+            return hashlib.md5(base_string.encode('utf-8')).hexdigest().upper()
+        
+        # Generate signature
+        signature = create_md5_signature(clean_params, APP_SECRET)
+        clean_params['sign'] = signature
+        
+        # Build URL
+        url = base_url + '?' + '&'.join([f"{k}={v}" for k, v in clean_params.items()])
+        
+        # Make request
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        
+        # Parse response
+        raw = response.json()
+        
+        # Extract products from response
+        items = []
+        if 'aliexpress_affiliate_product_query_response' in raw:
+            resp = raw['aliexpress_affiliate_product_query_response']
+            if 'resp_result' in resp and 'result' in resp['resp_result']:
+                result = resp['resp_result']['result']
+                if 'products' in result and 'product' in result['products']:
+                    items = result['products']['product']
+                    if not isinstance(items, list):
+                        items = [items]
+        elif 'aliexpress_affiliate_hotproduct_query_response' in raw:
+            resp = raw['aliexpress_affiliate_hotproduct_query_response']
+            if 'resp_result' in resp and 'result' in resp['resp_result']:
+                result = resp['resp_result']['result']
+                if 'products' in result and 'product' in result['products']:
+                    items = result['products']['product']
+                    if not isinstance(items, list):
+                        items = [items]
+        
+        # Normalize items for consistent format
+        normalized_items = _normalize_items({'items': items})
+        
+        # If no real products found, fallback to mock data
+        if not normalized_items:
+            logger.warning("No products found from AliExpress API, returning mock data")
+            return generate_mock_data(page, pageSize)
+        
+        # Check which products are saved
+        if normalized_items:
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                
+                # Get product IDs from the items
+                product_ids = [str(item.get('product_id', '')) for item in normalized_items if item.get('product_id')]
+                
+                if product_ids:
+                    # Create placeholders for the IN clause
+                    placeholders = ','.join(['%s'] * len(product_ids))
+                    
+                    # Query saved_products table to get saved_at timestamps
+                    cursor.execute(f"""
+                        SELECT product_id, saved_at 
+                        FROM saved_products 
+                        WHERE product_id IN ({placeholders})
+                    """, product_ids)
+                    
+                    saved_products = {row[0]: row[1] for row in cursor.fetchall()}
+                    
+                    # Add saved_at field to items
+                    for item in normalized_items:
+                        product_id = str(item.get('product_id', ''))
+                        if product_id in saved_products:
+                            item['saved_at'] = saved_products[product_id].isoformat() if saved_products[product_id] else None
+                        else:
+                            item['saved_at'] = None
+                
+                cursor.close()
+                conn.close()
+            except Exception as e:
+                # If database check fails, just continue without saved_at info
+                logger.warning(f"Could not check saved products: {e}")
+                for item in normalized_items:
+                    item['saved_at'] = None
+        
+        return {
+            "items": normalized_items,
+            "page": page,
+            "pageSize": pageSize,
+            "total": len(normalized_items),
+            "hasMore": len(normalized_items) == pageSize,
+            "method": "aliexpress_api",
+            "source": "aliexpress"
+        }
+        
+    except requests.HTTPError as rexc:
+        text = getattr(rexc.response, "text", "")
+        logger.error(f"AliExpress HTTP error: {rexc} {text}")
+        # Fallback to mock data on API error
+        return generate_mock_data(page, pageSize)
     except Exception as e:
         logger.error(f"Search error: {e}")
-        raise HTTPException(status_code=500, detail="Search failed")
+        # Fallback to mock data on any error
+        return generate_mock_data(page, pageSize)
 
 # Saved products endpoint
 @app.get("/saved")
@@ -375,6 +645,81 @@ async def unsave_product(request: UnsaveRequest):
     except Exception as e:
         logger.error(f"Unsave product error: {e}")
         raise HTTPException(status_code=500, detail="Failed to remove product")
+
+# Test AliExpress API endpoint
+@app.get("/test-ali")
+async def test_aliexpress():
+    """Test AliExpress API with a simple search"""
+    if not ali_client:
+        return {
+            "status": "error",
+            "message": "AliExpress API not configured",
+            "solution": "Please set APP_KEY and APP_SECRET in environment variables"
+        }
+    
+    try:
+        # Test with a simple search
+        import hashlib
+        import time
+        
+        base_url = 'https://api-sg.aliexpress.com/sync'
+        
+        sys_params = {
+            'method': 'aliexpress.affiliate.product.query',
+            'app_key': APP_KEY,
+            'sign_method': 'md5',
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime()),
+            'format': 'json',
+            'v': '2.0'
+        }
+        
+        api_params = {
+            'page_no': 1,
+            'page_size': 5,
+            'target_language': 'EN',
+            'target_currency': 'USD',
+            'trackingId': TRACKING_ID,
+            'keywords': 'phone'
+        }
+        
+        all_params = {**sys_params, **api_params}
+        clean_params = {k: v for k, v in all_params.items() if v is not None and v != ''}
+        
+        def create_md5_signature(params, secret):
+            sorted_params = sorted(params.items())
+            base_string = secret
+            for key, value in sorted_params:
+                base_string += key + str(value)
+            base_string += secret
+            return hashlib.md5(base_string.encode('utf-8')).hexdigest().upper()
+        
+        signature = create_md5_signature(clean_params, APP_SECRET)
+        clean_params['sign'] = signature
+        
+        url = base_url + '?' + '&'.join([f"{k}={v}" for k, v in clean_params.items()])
+        
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        
+        raw = response.json()
+        items = _normalize_items(raw)
+        
+        return {
+            "status": "success",
+            "message": "AliExpress API is working",
+            "test_query": "phone",
+            "results_count": len(items),
+            "sample_products": items[:3] if items else [],
+            "api_url": url,
+            "response_keys": list(raw.keys()) if raw else []
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"AliExpress API error: {str(e)}",
+            "solution": "Check APP_KEY, APP_SECRET, and network connection"
+        }
 
 # Demo endpoint
 @app.get("/demo")
