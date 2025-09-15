@@ -337,12 +337,14 @@ async def search_products(
     q: Optional[str] = Query(None, description="Search query"),
     sort: str = Query("volume_desc", description="Sort order"),
     page: int = Query(1, ge=1, description="Page number"),
-    pageSize: int = Query(20, ge=1, le=100, description="Page size")
+    pageSize: int = Query(20, ge=1, le=100, description="Page size"),
+    hasVideo: Optional[bool] = Query(None, description="Has video"),
+    categoryId: Optional[str] = Query(None, description="Category ID")
 ):
     try:
         if not ali_client:
             logger.warning("AliExpress API not configured, returning mock data")
-            return generate_mock_data(page, pageSize)
+            return generate_mock_data(page, pageSize, hasVideo)
         
         # Use AliExpress API with MD5 signature method (working solution)
         import hashlib
@@ -433,10 +435,21 @@ async def search_products(
         # Normalize items for consistent format
         normalized_items = _normalize_items({'items': items})
         
+        # Apply hasVideo filter if requested
+        if hasVideo:
+            normalized_items = [item for item in normalized_items 
+                              if item.get('product_video_url') and item.get('product_video_url').strip()]
+            
+            # اگر محصولات ویدیو دار پیدا نشد، چندین صفحه دیگر را جستجو کن
+            if not normalized_items and page == 1:
+                normalized_items = _search_multiple_pages_for_video_products_production(
+                    q, categoryId, pageSize, ali_client
+                )
+        
         # If no real products found, fallback to mock data
         if not normalized_items:
             logger.warning("No products found from AliExpress API, returning mock data")
-            return generate_mock_data(page, pageSize)
+            return generate_mock_data(page, pageSize, hasVideo)
         
         # Check which products are saved
         if normalized_items:
@@ -797,15 +810,123 @@ async def get_demo_products():
         "source": "sample_data"
     }
 
+# Helper function for searching multiple pages for video products
+def _search_multiple_pages_for_video_products_production(q: str, categoryId: str, pageSize: int, ali_client):
+    """
+    جستجوی چندین صفحه برای پیدا کردن محصولات ویدیو دار در production
+    """
+    import hashlib
+    import time
+    import requests
+    
+    video_products = []
+    max_pages_to_search = 5  # حداکثر 5 صفحه جستجو کن
+    
+    for page_num in range(2, max_pages_to_search + 2):  # از صفحه 2 شروع کن
+        try:
+            # Use AliExpress API with MD5 signature method
+            method = "aliexpress.affiliate.product.query"
+            
+            # Base URL for AliExpress API
+            base_url = 'https://api-sg.aliexpress.com/sync'
+            
+            # System parameters
+            sys_params = {
+                'method': method,
+                'app_key': APP_KEY,
+                'sign_method': 'md5',
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime()),
+                'format': 'json',
+                'v': '2.0'
+            }
+            
+            # API parameters
+            api_params = {
+                'page_no': page_num,
+                'page_size': pageSize,
+                'target_language': 'EN',
+                'target_currency': 'USD',
+                'trackingId': TRACKING_ID
+            }
+            
+            # Add search parameters
+            if q:
+                api_params['keywords'] = q
+            if categoryId:
+                api_params['category_ids'] = categoryId
+            
+            # Combine all parameters
+            all_params = {**sys_params, **api_params}
+            
+            # Remove empty values
+            clean_params = {k: v for k, v in all_params.items() if v is not None and v != ''}
+            
+            # Create MD5 signature
+            def create_md5_signature(params, secret):
+                sorted_params = sorted(params.items())
+                base_string = secret
+                for key, value in sorted_params:
+                    base_string += key + str(value)
+                base_string += secret
+                return hashlib.md5(base_string.encode('utf-8')).hexdigest().upper()
+            
+            signature = create_md5_signature(clean_params, APP_SECRET)
+            clean_params['sign'] = signature
+            
+            # Build URL
+            url = base_url + '?' + '&'.join([f"{k}={v}" for k, v in clean_params.items()])
+            
+            # Make request
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            
+            # Parse response
+            raw = response.json()
+            
+            # Extract products from response
+            items = []
+            if 'aliexpress_affiliate_product_query_response' in raw:
+                resp = raw['aliexpress_affiliate_product_query_response']
+                if 'resp_result' in resp and 'result' in resp['resp_result']:
+                    result = resp['resp_result']['result']
+                    if 'products' in result and 'product' in result['products']:
+                        items = result['products']['product']
+                        if not isinstance(items, list):
+                            items = [items]
+            
+            # Normalize items
+            normalized_items = _normalize_items({'items': items})
+            
+            # Filter for video products
+            video_items = [item for item in normalized_items 
+                          if item.get('product_video_url') and item.get('product_video_url').strip()]
+            
+            video_products.extend(video_items)
+            
+            # اگر به اندازه کافی محصول ویدیو دار پیدا کردیم، متوقف شو
+            if len(video_products) >= pageSize:
+                break
+                
+        except Exception as e:
+            logger.warning(f"Error searching page {page_num} for video products: {e}")
+            continue
+    
+    # فقط تعداد مورد نیاز را برگردان
+    return video_products[:pageSize]
+
 # Mock data generator for development
-def generate_mock_data(page: int, pageSize: int):
+def generate_mock_data(page: int, pageSize: int, hasVideo: bool = False):
     items = []
     for i in range(pageSize):
+        # Only add video URL for some items if hasVideo filter is not active
+        # If hasVideo filter is active, all items should have video
+        has_video = not hasVideo or (i % 2 == 0)  # Every other item has video when filter is active
+        
         item = {
             "product_id": f"mock_{page}_{i}",
             "product_title": f"Mock Product {page}_{i}",
             "product_main_image_url": f"https://picsum.photos/400/400?random={page}_{i}",
-            "product_video_url": f"https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+            "product_video_url": f"https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4" if has_video else None,
             "product_description": f"This is a mock product description for item {page}_{i}",
             "images_extra": [
                 f"https://picsum.photos/400/400?random={page}_{i}_1",

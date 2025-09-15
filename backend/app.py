@@ -1370,6 +1370,8 @@ def search_products_real(
     hot: bool = Query(False, description="Hot products only"),
     target_currency: str = Query("USD", description="Target currency"),
     target_language: str = Query("EN", description="Target language"),
+    hasVideo: Optional[bool] = Query(None, description="Has video"),
+    sort: str = Query("volume_desc", description="Sort order"),
 ):
     """
     Direct product search from AliExpress API
@@ -1504,6 +1506,17 @@ def search_products_real(
         # Normalize items for consistent format
         items = _normalize_items({'items': items})
 
+        # Apply hasVideo filter if requested
+        if hasVideo:
+            items = [item for item in items 
+                    if item.get('product_video_url') and item.get('product_video_url').strip()]
+            
+            # اگر محصولات ویدیو دار پیدا نشد، چندین صفحه دیگر را جستجو کن
+            if not items and page == 1:
+                items = _search_multiple_pages_for_video_products(
+                    method, params, api_params, passthrough, request, pageSize
+                )
+
         # If still nothing found, try other common paths (soft guard)
         if not items:
             result = raw.get("result") or {}
@@ -1570,6 +1583,7 @@ def search_products_real(
             "items": items or [],
             "page": page,
             "pageSize": pageSize,
+            "hasMore": len(items or []) == pageSize,  # اگر تعداد items برابر pageSize باشد، احتمالاً صفحه بعدی وجود دارد
             "live": True,
             "method": method,
             **({"raw": raw} if debug else {})
@@ -1676,6 +1690,8 @@ def search_products_with_fallback(
     target_currency: str = Query("USD", description="Target currency"),
     target_language: str = Query("EN", description="Target language"),
     demo: bool = Query(False, description="Use demo mode"),
+    hasVideo: Optional[bool] = Query(None, description="Has video"),
+    sort: str = Query("volume_desc", description="Sort order"),
 ):
     """
     Search products with demo fallback - guaranteed to return results
@@ -1741,14 +1757,14 @@ def search_products_with_fallback(
             "page": page,
             "pageSize": pageSize,
             "total": len(sample_products),
-            "hasMore": False,
+            "hasMore": len(sample_products) == pageSize,  # اگر تعداد items برابر pageSize باشد، احتمالاً صفحه بعدی وجود دارد
             "method": "demo_search",
             "source": "demo_data",
             "demo_mode": True
         }
     
     # Continue with real API call
-    return search_products_real(request, q, categoryId, page, pageSize, hot, target_currency, target_language)
+    return search_products_real(request, q, categoryId, page, pageSize, hot, target_currency, target_language, hasVideo, sort)
         
 @app.post("/ali/link")
 def ali_generate_link(urls: List[str]):
@@ -1805,6 +1821,109 @@ def ali_generate_link(urls: List[str]):
         return {"links": links}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+# ─────────────────── Helper Functions ───────────────────
+def _search_multiple_pages_for_video_products(method, params, api_params, passthrough, request, pageSize):
+    """
+    جستجوی چندین صفحه برای پیدا کردن محصولات ویدیو دار
+    """
+    import hashlib
+    import time
+    import requests
+    
+    base_url = 'https://api-sg.aliexpress.com/sync'
+    video_products = []
+    max_pages_to_search = 5  # حداکثر 5 صفحه جستجو کن
+    
+    for page_num in range(2, max_pages_to_search + 2):  # از صفحه 2 شروع کن
+        try:
+            # System parameters
+            sys_params = {
+                'method': method,
+                'app_key': APP_KEY,
+                'sign_method': 'md5',
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime()),
+                'format': 'json',
+                'v': '2.0'
+            }
+            
+            # API parameters
+            current_api_params = api_params.copy()
+            current_api_params['page_no'] = page_num
+            current_api_params['page_size'] = pageSize
+            
+            # Add passthrough parameters
+            for k in passthrough:
+                v = request.query_params.get(k)
+                if v:
+                    current_api_params[k] = v
+            
+            # Combine all parameters
+            all_params = {**sys_params, **current_api_params}
+            
+            # Remove empty values
+            clean_params = {k: v for k, v in all_params.items() if v is not None and v != ''}
+            
+            # Create MD5 signature
+            def create_md5_signature(params, secret):
+                sorted_params = sorted(params.items())
+                base_string = secret
+                for key, value in sorted_params:
+                    base_string += key + str(value)
+                base_string += secret
+                return hashlib.md5(base_string.encode('utf-8')).hexdigest().upper()
+            
+            signature = create_md5_signature(clean_params, APP_SECRET)
+            clean_params['sign'] = signature
+            
+            # Build URL
+            url = base_url + '?' + '&'.join([f"{k}={v}" for k, v in clean_params.items()])
+            
+            # Make request
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            
+            # Parse response
+            raw = response.json()
+            
+            # Extract products
+            items = []
+            if 'aliexpress_affiliate_product_query_response' in raw:
+                resp = raw['aliexpress_affiliate_product_query_response']
+                if 'resp_result' in resp and 'result' in resp['resp_result']:
+                    result = resp['resp_result']['result']
+                    if 'products' in result and 'product' in result['products']:
+                        items = result['products']['product']
+                        if not isinstance(items, list):
+                            items = [items]
+            elif 'aliexpress_affiliate_hotproduct_query_response' in raw:
+                resp = raw['aliexpress_affiliate_hotproduct_query_response']
+                if 'resp_result' in resp and 'result' in resp['resp_result']:
+                    result = resp['resp_result']['result']
+                    if 'products' in result and 'product' in result['products']:
+                        items = result['products']['product']
+                        if not isinstance(items, list):
+                            items = [items]
+            
+            # Normalize items
+            normalized_items = _normalize_items({'items': items})
+            
+            # Filter for video products
+            video_items = [item for item in normalized_items 
+                          if item.get('product_video_url') and item.get('product_video_url').strip()]
+            
+            video_products.extend(video_items)
+            
+            # اگر به اندازه کافی محصول ویدیو دار پیدا کردیم، متوقف شو
+            if len(video_products) >= pageSize:
+                break
+                
+        except Exception as e:
+            print(f"Error searching page {page_num}: {e}")
+            continue
+    
+    # فقط تعداد مورد نیاز را برگردان
+    return video_products[:pageSize]
 
 # ─────────────────── Local run ───────────────────
 if __name__ == "__main__":
