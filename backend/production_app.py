@@ -588,18 +588,16 @@ async def save_product(request: SaveProductRequest):
         # Insert or update product
         query = """
         INSERT INTO saved_products (
-            product_id, product_title, product_main_image_url, product_video_url,
-            product_description, images_extra, sale_price, sale_price_currency,
-            original_price, original_price_currency, promotion_link,
-            rating_weighted, lastest_volume, saved_at, fetched_at
+            product_id, title, image_main, video_url,
+            sale_price, sale_price_currency, original_price, original_price_currency, 
+            promotion_link, rating_weighted, lastest_volume, images_extra,
+            saved_at, updated_at
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW()
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW()
         ) ON DUPLICATE KEY UPDATE
-            product_title = VALUES(product_title),
-            product_main_image_url = VALUES(product_main_image_url),
-            product_video_url = VALUES(product_video_url),
-            product_description = VALUES(product_description),
-            images_extra = VALUES(images_extra),
+            title = VALUES(title),
+            image_main = VALUES(image_main),
+            video_url = VALUES(video_url),
             sale_price = VALUES(sale_price),
             sale_price_currency = VALUES(sale_price_currency),
             original_price = VALUES(original_price),
@@ -607,7 +605,8 @@ async def save_product(request: SaveProductRequest):
             promotion_link = VALUES(promotion_link),
             rating_weighted = VALUES(rating_weighted),
             lastest_volume = VALUES(lastest_volume),
-            saved_at = NOW()
+            images_extra = VALUES(images_extra),
+            updated_at = NOW()
         """
         
         cursor.execute(query, (
@@ -615,15 +614,14 @@ async def save_product(request: SaveProductRequest):
             request.title,
             request.image_main,
             request.video_url,
-            None,  # product_description
-            json.dumps(request.images_extra) if request.images_extra else None,
             request.selected_price.value,
             request.selected_price.currency,
             request.selected_price.original,
             request.selected_price.original_currency,
             request.promotion_link,
             request.rating_weighted,
-            request.lastest_volume
+            request.lastest_volume,
+            json.dumps(request.images_extra) if request.images_extra else None
         ))
         
         cursor.close()
