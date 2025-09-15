@@ -89,18 +89,87 @@ async def health_check():
         # Test database connection
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT 1")
+        
+        # Check if tables exist, if not create them
+        try:
+            cursor.execute("SELECT COUNT(*) FROM saved_products")
+            count = cursor.fetchone()[0]
+        except mysql.connector.Error as e:
+            if e.errno == 1146:  # Table doesn't exist
+                # Create tables if they don't exist
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS saved_products (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        product_id VARCHAR(255) NOT NULL,
+                        title TEXT,
+                        image_main TEXT,
+                        video_url TEXT,
+                        sale_price DECIMAL(10,2),
+                        sale_price_currency VARCHAR(10),
+                        original_price DECIMAL(10,2),
+                        original_price_currency VARCHAR(10),
+                        lastest_volume INT,
+                        rating_weighted DECIMAL(3,2),
+                        category_id VARCHAR(255),
+                        promotion_link TEXT,
+                        product_url TEXT,
+                        shop_url TEXT,
+                        shop_title VARCHAR(500),
+                        discount_percentage DECIMAL(5,2),
+                        commission_rate DECIMAL(5,2),
+                        commission_value DECIMAL(10,2),
+                        images_extra JSON,
+                        product_detail_url TEXT,
+                        product_sku VARCHAR(255),
+                        product_brand VARCHAR(255),
+                        product_condition VARCHAR(50),
+                        product_warranty VARCHAR(255),
+                        product_shipping_info TEXT,
+                        product_return_policy TEXT,
+                        saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        
+                        INDEX idx_product_id (product_id),
+                        INDEX idx_saved_at (saved_at)
+                    )
+                """)
+                
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS search_history (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        query VARCHAR(255) NOT NULL,
+                        results_count INT DEFAULT 0,
+                        user_ip VARCHAR(45),
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        
+                        INDEX idx_query (query),
+                        INDEX idx_created_at (created_at)
+                    )
+                """)
+                
+                conn.commit()
+                count = 0
+            else:
+                raise e
+        
         cursor.close()
         conn.close()
         
         return {
             "status": "healthy",
             "database": "connected",
-            "aliexpress_api": "configured" if APP_KEY else "not_configured"
+            "aliexpress_api": "configured" if APP_KEY else "not_configured",
+            "saved_products_count": count
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        raise HTTPException(status_code=500, detail="Service unhealthy")
+        return {
+            "status": "unhealthy",
+            "database": "error",
+            "aliexpress_api": "not_configured",
+            "error": str(e)
+        }
 
 # Stats endpoint
 @app.get("/stats")
@@ -129,7 +198,7 @@ async def get_stats():
 # Search endpoint with AliExpress API
 @app.get("/search")
 async def search_products(
-    q: str = Query(..., description="Search query"),
+    q: Optional[str] = Query(None, description="Search query"),
     sort: str = Query("volume_desc", description="Sort order"),
     page: int = Query(1, ge=1, description="Page number"),
     pageSize: int = Query(20, ge=1, le=100, description="Page size")
@@ -306,6 +375,74 @@ async def unsave_product(request: UnsaveRequest):
     except Exception as e:
         logger.error(f"Unsave product error: {e}")
         raise HTTPException(status_code=500, detail="Failed to remove product")
+
+# Demo endpoint
+@app.get("/demo")
+async def get_demo_products():
+    """Get demo products for presentation"""
+    sample_products = [
+        {
+            "product_id": "1005001234567890",
+            "product_title": "Wireless Bluetooth Headphones - High Quality Sound",
+            "product_main_image_url": "https://ae01.alicdn.com/kf/H1234567890.jpg",
+            "product_video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+            "sale_price": 25.99,
+            "sale_price_currency": "USD",
+            "original_price": 49.99,
+            "original_price_currency": "USD",
+            "lastest_volume": 1250,
+            "rating_weighted": 4.8,
+            "first_level_category_id": "100001",
+            "promotion_link": "https://s.click.aliexpress.com/demo1",
+            "commission_rate": 8.5,
+            "discount": 48,
+            "saved_at": None
+        },
+        {
+            "product_id": "1005001234567891",
+            "product_title": "Smart Watch with Heart Rate Monitor - Fitness Tracker",
+            "product_main_image_url": "https://ae01.alicdn.com/kf/H1234567891.jpg",
+            "product_video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
+            "sale_price": 89.99,
+            "sale_price_currency": "USD",
+            "original_price": 159.99,
+            "original_price_currency": "USD",
+            "lastest_volume": 890,
+            "rating_weighted": 4.6,
+            "first_level_category_id": "100002",
+            "promotion_link": "https://s.click.aliexpress.com/demo2",
+            "commission_rate": 12.0,
+            "discount": 44,
+            "saved_at": None
+        },
+        {
+            "product_id": "1005001234567892",
+            "product_title": "Portable Power Bank 20000mAh - Fast Charging",
+            "product_main_image_url": "https://ae01.alicdn.com/kf/H1234567892.jpg",
+            "product_video_url": "",
+            "sale_price": 19.99,
+            "sale_price_currency": "USD",
+            "original_price": 35.99,
+            "original_price_currency": "USD",
+            "lastest_volume": 2100,
+            "rating_weighted": 4.7,
+            "first_level_category_id": "100003",
+            "promotion_link": "https://s.click.aliexpress.com/demo3",
+            "commission_rate": 6.5,
+            "discount": 44,
+            "saved_at": None
+        }
+    ]
+    
+    return {
+        "items": sample_products,
+        "page": 1,
+        "pageSize": 3,
+        "total": len(sample_products),
+        "hasMore": False,
+        "method": "demo",
+        "source": "sample_data"
+    }
 
 # Mock data generator for development
 def generate_mock_data(page: int, pageSize: int):
