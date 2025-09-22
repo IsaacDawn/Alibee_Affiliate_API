@@ -1,9 +1,52 @@
 services:
   - type: web
-    name: alibee-api
+    name: alibee-affiliate-api
     env: python
-    rootDir: backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     plan: free
-    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m uvicorn backend.app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: PORT
+        value: 10000
+      - key: DB_HOST
+        fromDatabase:
+          name: alibee-mysql
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: alibee-mysql
+          property: port
+      - key: DB_NAME
+        fromDatabase:
+          name: alibee-mysql
+          property: database
+      - key: DB_USER
+        fromDatabase:
+          name: alibee-mysql
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: alibee-mysql
+          property: password
+      - key: APP_KEY
+        sync: false
+      - key: APP_SECRET
+        sync: false
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: DEFAULT_PAGE_SIZE
+        value: "20"
+      - key: MAX_PAGE_SIZE
+        value: "100"
+      - key: DAILY_PRODUCTS_ENABLED
+        value: "false"
+      - key: EXCHANGE_RATE_ENABLED
+        value: "false"
+
+databases:
+  - name: alibee-mysql
+    plan: free
+    databaseName: alibee_affiliate
+    user: alibee_user
