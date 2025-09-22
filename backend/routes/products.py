@@ -1,151 +1,218 @@
-# Product-related routes
+# backend/routes/products.py
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, List
-from backend.services.database import db_service
-from backend.services.aliexpress import aliexpress_service
-from backend.models.product import SaveProductRequest, ApiResponse, PaginatedResponse, ProductResponse
-import logging
+from models.schemas import SaveProduct, UpdateProductDescription
+from database.connection import db_ops
+from utils.helpers import get_demo_products, validate_pagination_params, create_success_response, create_error_response
 
-logger = logging.getLogger(__name__)
+router = APIRouter()
 
-router = APIRouter(prefix="/products", tags=["products"])
-
-@router.get("/", response_model=PaginatedResponse)
-async def get_products(
-    q: Optional[str] = None,
-    categoryId: Optional[str] = None,
-    hasVideo: Optional[bool] = None,
-    sort: str = Query("volume_desc", pattern="^(volume_desc|discount_desc|rating_desc)$"),
-    page: int = 1,
-    pageSize: int = 20,
-):
-    """Get saved products from database"""
+@router.post("/save")
+def save_product_simple(p: SaveProduct):
+    """Save a product to the database"""
     try:
-        filters = {
-            'q': q,
-            'categoryId': categoryId,
-            'hasVideo': hasVideo,
-            'sort': sort,
-        }
+        # Convert Pydantic model to dict
+        product_data = p.dict()
         
-        items, has_more = db_service.get_products(filters, page, pageSize)
+        # Save to database
+        success = db_ops.save_product(product_data)
         
-        return PaginatedResponse(
-            items=[ProductResponse(**item) for item in items],
-            page=page,
-            pageSize=pageSize,
-            hasMore=has_more
-        )
+        if success:
+            return create_success_response(message="Product saved successfully")
+        else:
+            raise HTTPException(status_code=500, detail="Failed to save product")
+            
     except Exception as e:
-        logger.error(f"Error getting products: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to save product: {str(e)}")
 
-@router.get("/search", response_model=PaginatedResponse)
-async def search_products(
-    q: Optional[str] = None,
-    categoryId: Optional[str] = None,
-    hasVideo: Optional[bool] = None,
-    sort: str = Query("volume_desc", pattern="^(volume_desc|discount_desc|rating_desc)$"),
-    page: int = 1,
-    pageSize: int = 20,
-):
-    """Search products using AliExpress API"""
+@router.post("/affiliator/save")
+def save_product(p: SaveProduct):
+    """Save a product to the database (affiliator endpoint)"""
     try:
-        if not aliexpress_service.is_configured():
-            raise HTTPException(status_code=503, detail="AliExpress API not configured")
+        # Convert Pydantic model to dict
+        product_data = p.dict()
         
-        # Search using AliExpress API
-        raw_response = aliexpress_service.search_products(
-            query=q or "phone",
+        # Save to database
+        success = db_ops.save_product(product_data)
+        
+        if success:
+            return create_success_response(message="Product saved successfully")
+        else:
+            raise HTTPException(status_code=500, detail="Failed to save product")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save product: {str(e)}")
+
+@router.post("/unsave")
+def unsave_product_simple(request: dict):
+    """Remove a product from saved products"""
+    product_id = request.get("product_id")
+    if not product_id:
+        raise HTTPException(status_code=400, detail="product_id is required")
+    
+    success = db_ops.unsave_product(product_id)
+    
+    if success:
+        return create_success_response(message="Product unsaved successfully")
+    else:
+        return create_error_response("Product not found in saved list")
+
+@router.delete("/affiliator/unsave/{product_id}")
+def unsave_product(product_id: str):
+    """Remove a product from saved products (affiliator endpoint)"""
+    success = db_ops.unsave_product(product_id)
+    
+    if success:
+        return create_success_response(message="Product unsaved successfully")
+    else:
+        return create_error_response("Product not found in saved list")
+
+@router.delete("/unsave/{product_id}")
+def unsave_product_simple_by_id(product_id: str):
+    """Remove a product from saved products by ID"""
+    success = db_ops.unsave_product(product_id)
+    
+    if success:
+        return create_success_response(message="Product removed successfully")
+    else:
+        return create_error_response("Product not found")
+
+@router.get("/saved")
+def get_saved_products(
+    q: Optional[str] = Query(None, description="Search query"),
+    sort: str = Query("saved_at_desc", pattern="^(saved_at_desc|saved_at_asc|title_asc|title_desc)$"),
+    page: int = Query(1, ge=1, description="Page number"),
+    pageSize: int = Query(20, ge=1, le=100, description="Page size"),
+):
+    """Get saved products with pagination and search"""
+    try:
+        page, page_size = validate_pagination_params(page, pageSize)
+        
+        rows, total = db_ops.get_saved_products(
             page=page,
-            page_size=pageSize,
-            category_id=categoryId,
-            has_video=hasVideo,
+            page_size=page_size,
+            search_query=q,
             sort=sort
         )
         
-        items = aliexpress_service.normalize_products(raw_response)
-        
-        # Check which products are saved
-        if items:
-            product_ids = [item.get('product_id', '') for item in items if item.get('product_id')]
-            saved_products = db_service.get_saved_products_for_items(product_ids)
-            
-            for item in items:
-                product_id = str(item.get('product_id', ''))
-                if product_id in saved_products:
-                    item['saved_at'] = saved_products[product_id].isoformat() if saved_products[product_id] else None
-                else:
-                    item['saved_at'] = None
-        
-        return PaginatedResponse(
-            items=[ProductResponse(**item) for item in items],
-            page=page,
-            pageSize=pageSize,
-            hasMore=len(items) == pageSize
-        )
+        return {
+            "items": rows,
+            "page": page,
+            "pageSize": page_size,
+            "hasMore": len(rows) >= page_size,
+            "total": total
+        }
     except Exception as e:
-        logger.error(f"Error searching products: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to get saved products: {str(e)}")
 
-@router.get("/demo", response_model=PaginatedResponse)
-async def get_demo_products():
-    """Get demo products for presentation"""
+@router.post("/update-description")
+def update_product_description(update_data: UpdateProductDescription):
+    """Update product description/title"""
     try:
-        if not aliexpress_service.is_configured():
-            raise HTTPException(status_code=503, detail="AliExpress API not configured")
-        
-        # Get hot products as demo
-        raw_response = aliexpress_service.get_hot_products(page=1, page_size=20)
-        items = aliexpress_service.normalize_products(raw_response)
-        
-        # Check which products are saved
-        if items:
-            product_ids = [item.get('product_id', '') for item in items if item.get('product_id')]
-            saved_products = db_service.get_saved_products_for_items(product_ids)
-            
-            for item in items:
-                product_id = str(item.get('product_id', ''))
-                if product_id in saved_products:
-                    item['saved_at'] = saved_products[product_id].isoformat() if saved_products[product_id] else None
-                else:
-                    item['saved_at'] = None
-        
-        return PaginatedResponse(
-            items=[ProductResponse(**item) for item in items],
-            page=1,
-            pageSize=20,
-            hasMore=False
+        success = db_ops.update_product_title(
+            update_data.product_id,
+            update_data.custom_description
         )
-    except Exception as e:
-        logger.error(f"Error getting demo products: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/save", response_model=ApiResponse)
-async def save_product(product: SaveProductRequest):
-    """Save a product to saved_products table"""
-    try:
-        product_data = product.dict()
-        success = db_service.save_product(product.product_id, product_data)
         
         if success:
-            return ApiResponse(success=True, message="Product saved successfully")
+            return create_success_response(
+                data={"product_id": update_data.product_id},
+                message="Product description updated successfully"
+            )
         else:
-            return ApiResponse(success=False, error="Failed to save product")
+            raise HTTPException(status_code=404, detail="Product not found in saved products")
+            
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error saving product: {e}")
-        return ApiResponse(success=False, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to update description: {str(e)}")
 
-@router.delete("/unsave/{product_id}", response_model=ApiResponse)
-async def unsave_product(product_id: str):
-    """Remove a product from saved_products table"""
+@router.post("/ensure-unique-constraint")
+def ensure_unique_constraint():
+    """Ensure unique constraint on product_id in saved_products table"""
+    result = db_ops.ensure_unique_constraint()
+    
+    if result["status"] == "error":
+        raise HTTPException(status_code=500, detail=result["message"])
+    
+    return result
+
+@router.get("/check/{product_id}")
+def check_product_exists(product_id: str):
+    """Check if a product exists in saved products"""
     try:
-        success = db_service.unsave_product(product_id)
+        with db_ops.db.get_cursor() as (cursor, connection):
+            cursor.execute("SELECT product_id FROM saved_products WHERE product_id = %s", (product_id,))
+            exists = cursor.fetchone() is not None
+            
+            return {
+                "exists": exists,
+                "product_id": product_id,
+                "message": "Product exists" if exists else "Product not found"
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to check product: {str(e)}")
+
+@router.get("/info/{product_id}")
+def get_product_info(product_id: str):
+    """Get detailed information about a saved product"""
+    try:
+        with db_ops.db.get_cursor() as (cursor, connection):
+            cursor.execute("""
+                SELECT product_id, product_title, custom_title, saved_at, has_video 
+                FROM saved_products 
+                WHERE product_id = %s
+            """, (product_id,))
+            result = cursor.fetchone()
+            
+            if result:
+                return {
+                    "product_id": result[0],
+                    "product_title": result[1],
+                    "custom_title": result[2],
+                    "saved_at": result[3].isoformat() if result[3] else None,
+                    "has_video": bool(result[4]),
+                    "exists": True
+                }
+            else:
+                return {
+                    "exists": False,
+                    "product_id": product_id,
+                    "message": "Product not found"
+                }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get product info: {str(e)}")
+
+@router.put("/save")
+def update_product(p: SaveProduct):
+    """Update an existing product in the database"""
+    try:
+        # Convert Pydantic model to dict
+        product_data = p.dict()
+        
+        # Update in database
+        success = db_ops.save_product(product_data)
         
         if success:
-            return ApiResponse(success=True, message="Product unsaved successfully")
+            return create_success_response(message="Product updated successfully")
         else:
-            return ApiResponse(success=False, error="Product not found in saved list")
+            raise HTTPException(status_code=500, detail="Failed to update product")
+            
     except Exception as e:
-        logger.error(f"Error unsaving product: {e}")
-        return ApiResponse(success=False, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to update product: {str(e)}")
+
+@router.get("/demo-simple")
+def demo_products_simple():
+    """Get demo products for testing"""
+    demo_products = get_demo_products()
+    
+    return {
+        "items": demo_products,
+        "page": 1,
+        "pageSize": len(demo_products),
+        "hasMore": False,
+        "total": len(demo_products),
+        "method": "demo_products",
+        "source": "demo_data",
+        "demo_mode": True
+    }

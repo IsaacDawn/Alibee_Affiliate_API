@@ -1,58 +1,36 @@
-# Statistics and health routes
-from fastapi import APIRouter, HTTPException
-from backend.services.database import db_service
-from backend.services.aliexpress import aliexpress_service
-from backend.models.stats import StatsResponse, SystemStatusResponse
-import logging
+# backend/routes/stats.py
+from fastapi import APIRouter
+from database.connection import db_ops
+from utils.helpers import create_success_response
 
-logger = logging.getLogger(__name__)
+router = APIRouter()
 
-router = APIRouter(prefix="/stats", tags=["stats"])
-
-@router.get("/", response_model=StatsResponse)
-async def get_stats():
+@router.get("/stats")
+def get_stats():
     """Get application statistics"""
     try:
-        saved_products = db_service.get_saved_products_count()
-        total_products = db_service.get_total_products_count()
+        # Get database stats
+        db_stats = db_ops.get_stats()
         
-        # TODO: Implement actual search count
-        total_searches = 0
+        # Add additional stats
+        stats = {
+            "totalProducts": db_stats.get('totalProducts', 0),
+            "savedProducts": db_stats.get('savedProducts', 0),
+            "totalSearches": 0,  # This would need to be tracked separately
+            "activeUsers": 0,    # This would need to be tracked separately
+            "affiliate_links": 0, # This would need to be tracked separately
+            "recent_searches": 0  # This would need to be tracked separately
+        }
         
-        return StatsResponse(
-            totalProducts=total_products,
-            savedProducts=saved_products,
-            totalSearches=total_searches
-        )
+        return create_success_response(data=stats, message="Stats retrieved successfully")
+        
     except Exception as e:
-        logger.error(f"Error getting stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/health", response_model=SystemStatusResponse)
-async def get_health():
-    """Get system health status"""
-    try:
-        # Check database connection
-        try:
-            db_service.get_total_products_count()  # Just check connection
-            db_status = "ok"
-        except Exception as e:
-            db_status = "error"
-            logger.error(f"Database health check failed: {e}")
-        
-        # Check AliExpress API
-        if aliexpress_service.is_configured():
-            ali_client = "ok"
-            ali_api_status = "آماده برای جستجو"
-        else:
-            ali_client = "not_configured"
-            ali_api_status = "نیاز به تنظیم APP_KEY و APP_SECRET"
-        
-        return SystemStatusResponse(
-            db=db_status,
-            ali_client=ali_client,
-            ali_api_status=ali_api_status
-        )
-    except Exception as e:
-        logger.error(f"Error getting health status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "totalProducts": 0,
+            "savedProducts": 0,
+            "totalSearches": 0,
+            "activeUsers": 0,
+            "affiliate_links": 0,
+            "recent_searches": 0,
+            "error": str(e)
+        }

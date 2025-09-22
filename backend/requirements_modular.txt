@@ -1,0 +1,43 @@
+# Alibee Affiliator API - Modular Version Requirements
+
+# Core FastAPI and web framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# Database
+mysql-connector-python==8.2.0
+
+# HTTP requests
+requests==2.31.0
+
+# Environment and configuration
+python-dotenv==1.0.0
+
+# Data validation and serialization
+pydantic==2.5.0
+
+# CORS middleware
+fastapi-cors==0.0.6
+
+# Development and testing (optional)
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.2
+
+# Logging and monitoring (optional)
+structlog==23.2.0
+
+# Caching (optional - for future use)
+redis==5.0.1
+
+# Security (optional - for future use)
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Background tasks (optional - for future use)
+celery==5.3.4
+
+# Documentation (optional)
+mkdocs==1.5.3
+mkdocs-material==9.4.8
