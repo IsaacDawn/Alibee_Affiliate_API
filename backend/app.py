@@ -39,6 +39,16 @@ def root():
         "health": "/health"
     }
 
+# Health check endpoint
+@app.get("/health")
+def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "message": "API is running",
+        "version": "2.0.0"
+    }
+
 # Additional endpoints that might be needed
 @app.get("/demo")
 def demo_products():
