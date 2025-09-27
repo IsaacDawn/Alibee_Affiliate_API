@@ -1,14 +1,11 @@
-# production_app.py - Temporary file for Render.com compatibility
-# This file redirects to the actual backend app
-
+# production_app.py - Simple redirect for Render.com
 import sys
 import os
 
-# Add backend directory to Python path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'backend'))
+# Add current directory to Python path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
 
-# Import the actual app
+# Import the app from backend
 from backend.app import app
-
-# Export the app for uvicorn
-__all__ = ['app']
