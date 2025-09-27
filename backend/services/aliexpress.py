@@ -274,7 +274,6 @@ class AliExpressService:
     
     def search_products_with_filters(self,
                                    query: str = None,
-                                   category_id: str = None,
                                    page: int = 1,
                                    page_size: int = 20,
                                    hot: bool = False,
@@ -282,46 +281,15 @@ class AliExpressService:
                                    min_price: float = None,
                                    max_price: float = None,
                                    has_video: bool = None) -> Dict[str, Any]:
-        """Search products with various filters"""
+        """Search products using only keywords - simplified search"""
         
-        # Prepare keywords
-        keywords = []
-        if query:
-            keywords.append(query)
-        
-        # Add category keywords if category is selected
-        if category_id and category_id != "" and category_id != "all":
-            category_keywords = {
-                "100001": "electronics gadgets",
-                "100002": "fashion clothing",
-                "100003": "home garden",
-                "100004": "sports outdoor",
-                "100005": "beauty health",
-                "100006": "automotive",
-                "100007": "toys hobbies",
-                "100008": "jewelry accessories",
-                "100009": "shoes bags",
-                "100010": "computer office",
-                "1421": "electronics gadgets",
-                "1509": "fashion clothing",
-                "1525": "fashion clothing",
-                "1526": "musical instruments music guitar piano drums"
-            }
-            
-            if category_id in category_keywords:
-                keywords.append(category_keywords[category_id])
-            else:
-                # Fallback to category_ids if no keyword mapping exists
-                category_id = category_id
-        
-        # Combine keywords
-        final_keywords = " ".join(keywords) if keywords else None
+        # Use only the search query as keywords
+        final_keywords = query if query and query.strip() else None
         
         # Choose method based on hot flag
         if hot:
             result = self.client.get_hot_products(
                 keywords=final_keywords,
-                category_ids=category_id if category_id and category_id not in category_keywords else None,
                 page=page,
                 page_size=page_size,
                 sort=sort
@@ -329,7 +297,6 @@ class AliExpressService:
         else:
             result = self.client.search_products(
                 keywords=final_keywords,
-                category_ids=category_id if category_id and category_id not in category_keywords else None,
                 page=page,
                 page_size=page_size,
                 sort=sort,

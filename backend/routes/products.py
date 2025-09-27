@@ -3,11 +3,11 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, List
 from models.schemas import SaveProduct, UpdateProductDescription
 from database.connection import db_ops
-from utils.helpers import get_demo_products, validate_pagination_params, create_success_response, create_error_response
+from utils.helpers import validate_pagination_params, create_success_response, create_error_response
 
 router = APIRouter()
 
-@router.post("/save")
+@router.post("/save-product")
 def save_product_simple(p: SaveProduct):
     """Save a product to the database"""
     try:
@@ -201,18 +201,91 @@ def update_product(p: SaveProduct):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update product: {str(e)}")
 
+@router.get("/products")
+def get_products(
+    page: int = Query(1, ge=1, description="Page number"),
+    pageSize: int = Query(20, ge=1, le=100, description="Page size"),
+):
+    """Get products for homepage (no search query)"""
+    # Return sample products for homepage
+    sample_products = [
+        {
+            "product_id": "1005001234567890",
+            "product_title": "📱 Smartphone - 128GB Storage",
+            "product_main_image_url": "https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?w=400&h=400&fit=crop&crop=center",
+            "sale_price": 199.99,
+            "sale_price_currency": "USD",
+            "original_price": 299.99,
+            "original_price_currency": "USD",
+            "lastest_volume": 1200,
+            "rating_weighted": 4.5,
+            "first_level_category_id": "100001",
+            "promotion_link": "https://example.com/phone",
+            "commission_rate": 8.0,
+            "discount": 33,
+            "saved_at": None
+        },
+        {
+            "product_id": "1005001234567891",
+            "product_title": "💻 Laptop - 16GB RAM, 512GB SSD",
+            "product_main_image_url": "https://images.unsplash.com/photo-1496181133206-80ce9b88a853?w=400&h=400&fit=crop&crop=center",
+            "sale_price": 799.99,
+            "sale_price_currency": "USD",
+            "original_price": 1199.99,
+            "original_price_currency": "USD",
+            "lastest_volume": 450,
+            "rating_weighted": 4.8,
+            "first_level_category_id": "100002",
+            "promotion_link": "https://example.com/laptop",
+            "commission_rate": 10.0,
+            "discount": 33,
+            "saved_at": None
+        },
+        {
+            "product_id": "1005001234567892",
+            "product_title": "⌚ Smart Watch - Fitness Tracker",
+            "product_main_image_url": "https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400&h=400&fit=crop&crop=center",
+            "sale_price": 149.99,
+            "sale_price_currency": "USD",
+            "original_price": 249.99,
+            "original_price_currency": "USD",
+            "lastest_volume": 890,
+            "rating_weighted": 4.6,
+            "first_level_category_id": "100003",
+            "promotion_link": "https://example.com/watch",
+            "commission_rate": 12.0,
+            "discount": 40,
+            "saved_at": None
+        }
+    ]
+    
+    # Apply pagination
+    start_index = (page - 1) * pageSize
+    end_index = start_index + pageSize
+    paginated_products = sample_products[start_index:end_index]
+    
+    return {
+        "items": paginated_products,
+        "page": page,
+        "pageSize": pageSize,
+        "total": len(sample_products),
+        "hasMore": end_index < len(sample_products),
+        "method": "products_homepage",
+        "source": "sample_data"
+    }
+
 @router.get("/demo-simple")
 def demo_products_simple():
     """Get demo products for testing"""
-    demo_products = get_demo_products()
-    
+    # Return empty demo products for now
     return {
-        "items": demo_products,
+        "items": [],
         "page": 1,
-        "pageSize": len(demo_products),
+        "pageSize": 0,
         "hasMore": False,
-        "total": len(demo_products),
+        "total": 0,
         "method": "demo_products",
         "source": "demo_data",
         "demo_mode": True
     }
+

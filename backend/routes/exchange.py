@@ -4,7 +4,7 @@ import requests
 
 router = APIRouter()
 
-@router.get("/exchange-rates")
+@router.get("/exchange")
 def get_exchange_rates(base_currency: str = Query("USD", description="Base currency")):
     """Get exchange rates from external API"""
     try:

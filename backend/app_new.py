@@ -43,15 +43,13 @@ def root():
 @app.get("/demo")
 def demo_products():
     """Demo products endpoint for backward compatibility"""
-    from utils.helpers import get_demo_products
-    demo_products = get_demo_products()
-    
+    # Return empty demo products for now
     return {
-        "items": demo_products,
+        "items": [],
         "page": 1,
-        "pageSize": len(demo_products),
+        "pageSize": 0,
         "hasMore": False,
-        "total": len(demo_products),
+        "total": 0,
         "method": "demo_products",
         "source": "demo_data",
         "demo_mode": True
